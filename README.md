@@ -1,9 +1,9 @@
 # lego-3d-voxel
 
-**把一个真实的 3D 模型（GLB）按层切开，变成逐层可拼的积木模型。**
-给 Claude / Codex 这类 agent 用的 skill：输入一个 `.glb`，输出"每层铺什么砖、什么颜色"的体素数据，再接积木引擎装配成可旋转、可拆装的成品页。
+**把一个 3D 形体变成逐层可拼的积木模型。**
+给 Claude / Codex 这类 agent 用的 skill：两条路线——**有模型**就按层真切片，**只有体素风参考图**就用基本形程序化生成，都输出"每层铺什么砖、什么颜色"的体素数据，再接积木引擎装配成可旋转、可拆装的成品页。
 
-> A skill that slices a 3D model into horizontal brick courses — one brick per voxel cell, colours sampled from the model's own texture.
+> A skill that turns a 3D subject into voxel brick courses — one brick per cell. Slice a real model, or generate the voxels procedurally when the reference is already blocky art.
 
 ![搭好的鹿](assets/deer.jpg)
 
@@ -13,7 +13,8 @@
 
 | 步骤 | 脚本 | 产出 |
 |---|---|---|
-| 1. 切片 | `scripts/vox.py` | `volume.json`：每格一个 `[x, y, z, 色名]` |
+| 1. 切片（有模型） | `scripts/vox.py` | `volume.json`：每格一个 `[x, y, z, 色名]` |
+| 1′. 生成（无模型） | `scripts/gen.py` + 场景文件 | 同一个 `volume.json`，只是格子由基本形写死 |
 | 2. 验收 | `scripts/preview.py` | 正视 / 侧视 / 背视 + 分层图 |
 | 3. 体检 | `scripts/probe.py` | 颜色分布、正面 ASCII 色图、深度剖面 |
 | 4. 缩放（可选） | `scripts/downscale.py` | 一半 / 四分之一的同款模型 |
@@ -21,12 +22,22 @@
 
 切片本身**只用 Python + numpy**，不需要任何 3D 软件；第 5 步的装配用的是 [lego-forge](https://github.com/ericfu-tianchi/lego-forge) 引擎（外部依赖，见下文）。
 
+## 两条路线，怎么选
+
+| 手上有什么 | 走哪条 | 为什么 |
+|---|---|---|
+| `.glb` / `.gltf` | 切片 | 形体忠实度最高，颜色来自模型贴图 |
+| **体素风 / 像素风的参考图** | **程序化生成** | 图里已经带着格子决策（哪里 1 格、哪里 3 格），照块面写基本形最准 |
+| 写实照片 | 都不成立 | 投影取色 + 目测造型 = 形状失真、颜色全错，实测被否决 |
+
 ## 为什么是"真切片"，不是"照图建模"
 
 两条路都试过：
 
-- **看图/凭想象建模**：形状必然失真，细节靠猜，颜色全错。用户明确否决过。
+- **照写实照片、凭想象捏形体**：形状必然失真，细节靠猜，颜色全错。用户明确否决过。
 - **真按层切片**：几何与颜色**只有一个来源——模型文件本身**。模型有凸起就有一层砖，模型是空心的，切片也是空心的。
+
+唯一例外是**参考图本身已经体素化**：那时图的块面就是格子决策，照着写基本形反而比找模型更准（见下文「没有模型文件」）。
 
 代价是件数不设上限（一件模型可能几万块砖），换来的是外形忠实。这个 skill 站的是"形体优先"那一边。
 
@@ -129,6 +140,46 @@ python scripts/downscale.py --src work/volume.json --out work_quarter/volume.jso
 
 **必须说明的代价**：1 格宽的细结构（鹿角尖、细腿、手指、衣带）归并后会变粗或断开。所以**先切细，再决定要不要缩小**。
 
+## 没有模型文件：程序化生成体素
+
+参考图本身就是体素/像素风时，写一个场景文件，用基本形把格子摆出来：
+
+```bash
+python scripts/gen.py --scene examples/whale-island.py --out work/volume.json
+python scripts/preview.py --vol work/volume.json --outdir work --px 8
+```
+
+场景文件是普通 Python，只要求 `build(v)`：
+
+```python
+def build(v):
+    v.revolve(0, 0, [6.7, 6.6, 6.0, 5.2, 4.3, 3.3, 2.2, 1.1], top_y=0, color=island_color)  # 浮空岛
+    v.ellipsoid(0.5, 6.3, 0.5, 6.4, 4.1, 3.7, 'Blue')                                        # 鲸身
+    v.repaint(lambda x, y, z: ((x + 3.5) / 5.4) ** 2 + ((y - 2.5) / 3.8) ** 2 <= 1.0, 'Tan')  # 肚皮
+    v.put(-4, 7, 3, 'Black')                                                                  # 眼睛
+```
+
+| 基本形 | 用途 |
+|---|---|
+| `v.ellipsoid(cx,cy,cz,rx,ry,rz,色)` | 主体体积（身体、头） |
+| `v.revolve(cx,cz,radii,top_y,色回调)` | 半径剖面旋转体：浮岛、树干、塔身 |
+| `v.tube(path,radius,色)` | 尾巴、四肢、斜向细长体（`radius=0` 是逐格线） |
+| `v.box(...)` / `v.put(...)` | 方块、眼睛、单点小件 |
+| `v.repaint(pred,色,only={'Blue'})` | 只换色不动几何：肚皮、背脊阴影 |
+| `v_hash(x,y,z,salt)` | 草皮 / 岩层杂色的确定性伪随机（同格永远同色，改参数重跑可复现） |
+
+![体素风的蓝鲸浮岛](assets/whale.jpg)
+
+实测（`examples/whale-island.py`）：19 × 22 × 16 格、1,265 格 → **430 件**、11 色、33 处未连接。
+
+**三条踩出来的教训**：
+
+1. **形体问题必须看 3D 渲染图**。正视图/ASCII 图上"看着对"的，渲染里经常是错的——鲸鱼陷进草皮、棕榈被鲸身整个挡住、尾鳍成了两根短叉，三处都是正视图骗的。
+2. **附件位置按主视角算，不是按坐标算**。棕榈放在主体侧面（+x）会被身体完全挡掉，得挪到岛的前角才看得见。
+3. **1 格厚的斜向体在渲染里会断**（尾茎、鳍），至少给 3 格；1 格厚的悬挑（叶尖、灯笼）必然报未连接。
+
+8 版迭代的完整日志、被推翻的做法、代价清单在 `references/procedural.md`。
+
 ## 实测
 
 | 模型 | 层数 | 网格 | 体素 | 件数 | 未连接 |
@@ -136,6 +187,7 @@ python scripts/downscale.py --src work/volume.json --out work_quarter/volume.jso
 | 海龟 `10-creature` | 92 | 138×92×128 | 206,265 | 44,597 | 44 |
 | 鹿 `01-creature` | 128 | 95×128×73 | 69,826 | 22,689 | 74 |
 | 角色 `05-character` | 128 | 95×128×53 | 53,549 | 15,092 | 138 |
+| 鲸鱼浮岛（生成，非切片） | 22 | 19×22×16 | 1,265 | 430 | 33 |
 
 ![海龟](assets/turtle.jpg)
 
@@ -144,6 +196,7 @@ python scripts/downscale.py --src work/volume.json --out work_quarter/volume.jso
 - **烘焙图集贴图会花**。有些模型（尤其导出的游戏资产）把每个面片的高光/AO 都烘进贴图，逐格取色就得到满身碎点。这不是切片错，是贴图本身没有干净基色。缓解：增大 `--absorb`，或对体素做几轮 3×3×3 颜色多数投票（会牺牲一点层次）。
 - **1 格宽的结构**在低层数下不可靠：会断、会变粗。
 - **未连接**是常态：换了颜色的相邻格不能并砖时，检查器会报 disconnected。深色的眼睛、边缘换色最容易触发。
+- 程序化生成那条路：件数 ≈ 体素数 × 1/3；色带边界必然是阶梯状（多混一格浅色消不掉）；左右对称靠手写循环，写错一侧在正视图上看不出来。
 - 只吃 `.glb` / `.gltf`，不支持 FBX / STL / USDZ，先转换。
 - 内存：200 万面的模型切片峰值约 1.2 GB，没有页面文件的机器会失败。
 - 装配那一步依赖 [lego-forge](https://github.com/ericfu-tianchi/lego-forge) 引擎；本仓库只负责切片和验收。
@@ -155,13 +208,17 @@ SKILL.md                  agent 读的入口：流程、验收标准、坑
 references/
   pipeline.md             管线细节：采样、填充、归并的顺序与参数
   pitfalls.md             踩过的坑：现象 / 根因 / 怎么验证
+  procedural.md           没有模型文件时：基本形、8 版迭代日志、已知代价
   validation.md           验收清单
 scripts/
   vox.py                  切片主程序（自包含：色板、材质归并表内置）
+  gen.py                  程序化生成：跑场景文件出 volume.json
   preview.py              三视图 + 分层图
   probe.py                颜色分布 / ASCII 色图 / 深度剖面
   downscale.py            2×2×2 归并缩放
   build.mjs               装配模板（给 lego-forge 引擎）
+examples/
+  whale-island.py         可直接改的场景文件（1,265 格 → 430 件）
 assets/                   README 用图
 ```
 

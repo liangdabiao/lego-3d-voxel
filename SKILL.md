@@ -1,15 +1,19 @@
 ---
 name: lego-3d-voxel
-description: Turn a real 3D model (GLB/GLTF) into a buildable LEGO set by slicing it into horizontal brick courses, one brick per voxel cell, with colours sampled from the model's own texture. Use when the user supplies a 3D model file (or an exported scan / sculpt) and wants it built in LEGO "layer by layer" — not when working from a flat photo.
+description: Turn a 3D subject into a buildable LEGO set one brick per voxel cell. Two routes: slice a real model (GLB/GLTF) into horizontal brick courses with colours from its own texture, or — when the reference is already blocky/voxel art and no model exists — generate the voxels procedurally with primitives. Use for "build this in LEGO, layer by layer".
 ---
 
-# 3D 模型 → 逐层切片 → 积木
+# 3D 形体 → 逐层切片 → 积木
 
 把用户给的 3D 模型（GLB）**真的按层切开**，每层按切片铺砖、逐层叠起来，颜色取自模型自带贴图。
-这是"形体优先"的做法：件数不设上限，外形、空腔、朝向必须忠实于模型。
+这是"形体优先"的做法：件数不设上限，外形、空腔、朝向必须忠实于原作。
 
-几何与颜色**只能有一个来源：模型文件本身**。不要用照片取色，也不要"看着渲染图想象形状"——
-那两条路都试过，结果是形状失真 + 颜色全错，用户明确否决。
+两条路线，按手上有什么来选：
+
+- **有模型文件** → 切片（本文主线）。几何与颜色只能来自模型本身；不要用照片取色，
+  也不要"看着渲染图想象形状"——那两条路都试过，形状失真 + 颜色全错，用户明确否决。
+- **只有体素风/像素风的参考图** → 程序化生成（见「没有模型文件」一节）。几何来自图里的块面，
+  颜色来自图里的色块，逐格写死、不用随机数。
 
 ## 自包含声明
 
@@ -24,7 +28,8 @@ description: Turn a real 3D model (GLB/GLTF) into a buildable LEGO set by slicin
 ## 什么时候用
 
 - 用户给了 `.glb` / `.gltf`（扫描件、雕刻、游戏资产），要求拼成积木、要求"一层一层切"。
-- 照片参考 → 走 `lego-forge` 的手工搭建流程，不要用本 skill。
+- 用户给的参考图**本身就是体素/像素风**（块面清楚），要求照着拼 → 走「没有模型文件」那节。
+- 写实照片、没有模型也没有现成体素块面 → 两条路都不成立，先跟用户对齐预期，不要硬做。
 
 ## 铁律（违反必然返工）
 
@@ -117,6 +122,40 @@ python <skill>/scripts/preview.py --vol <work>_half/volume.json --outdir <work>_
 - 颜色分区合理（脸是肤色、眉眼是深色、衣袍成片），没有大面积斑驳噪点；
 - **脸要凑近单独看**：眉毛 / 眼睛 / 胡子是分开的三层，眼睛不能消失。
 
+## 没有模型文件：程序化生成体素
+
+参考图本身就是**体素风/像素风**（块面清楚、色块分明）时，不要去找模型切片——图里已经带着
+格子决策（哪里 1 格、哪里 3 格），照块面写基本形最准，还能直接控制格数与件数。
+
+```bash
+python <skill>/scripts/gen.py --scene <work>/scene.py --out <work>/volume.json
+python <skill>/scripts/preview.py --vol <work>/volume.json --outdir <work> --px 8
+# 再走 build.mjs 装配 + 宿主渲染，**看成品渲染图**（下面第 1 条）
+```
+
+场景文件是普通 Python 文件，只要求 `build(v)`，用基本形把格子写进去：
+
+| 形体 | 方法 |
+|---|---|
+| 主体体积（身体、头） | `v.ellipsoid(cx,cy,cz,rx,ry,rz,色)` |
+| 浮岛 / 树干 / 塔身（半径剖面） | `v.revolve(cx,cz,radii,top_y,色回调)`，radii 由上往下 |
+| 尾巴 / 四肢 / 斜向细长体 | `v.tube(path,radius,色)`，radius=0 是逐格线 |
+| 方块、眼睛、单点小件 | `v.box(...)` / `v.put(x,y,z,色)` |
+| 换色不改几何（肚皮、背脊阴影） | `v.repaint(pred,色,only={'Blue'})` |
+| 草皮 / 岩层杂色 | `v_hash(x,y,z,salt)` 阈值分流（确定性，可复现） |
+
+三条实测教训：
+
+1. **形体问题必须看 3D 渲染图。** 正视图/ASCII 图上"看着对"的形体，渲染里经常是错的：
+   鲸鱼陷进草皮、棕榈被鲸身整个挡住、尾鳍成了两根短叉——三处都是正视图骗的。
+2. **附件位置按主视角算，不是按坐标算。** 棕榈放在主体侧面（+x）会被身体完全挡掉，
+   必须挪到岛的前角才看得见。
+3. **1 格厚的斜向体在渲染里会断**（尾茎、鳍），至少给 3 格；1 格厚的悬挑（叶尖、灯笼）
+   必然产生未连接，交付时一起报。
+
+完整实战（8 版迭代、每版改了什么、被推翻的做法、必须主动说的代价）见 `references/procedural.md`；
+可直接改的例子是 `examples/whale-island.py`：19 × 22 × 16 格、1,265 格 → 430 件、11 色、33 处未连接。
+
 ## 排错：先查这张表
 
 | 症状 | 病因 | 修法 |
@@ -144,10 +183,12 @@ python <skill>/scripts/preview.py --vol <work>_half/volume.json --outdir <work>_
 细节算法、参数取值、验证脚本全部在 `references/`：
 - `references/pipeline.md` — 十一个步骤的完整算法与数值约定（必读）
 - `references/pitfalls.md` — 每个坑的完整复盘：现象、根因、为什么当时的直觉是错的
+- `references/procedural.md` — 没有模型文件时：程序化生成的基本形、8 版迭代日志、已知代价
 - `references/validation.md` — 四关验收清单
 
 脚本（全部自包含，只用 numpy + pillow）：
 - `scripts/vox.py` — 切片主程序（`--ball` 出验证球）
+- `scripts/gen.py` — 程序化生成：跑场景文件出 volume.json（没模型时用）
 - `scripts/probe.py` — 体检：`--stats` 颜色分布 / `--layers A:B --cols C:D` 正面 ASCII 色图 / `--profile 列,层` 深度剖面
 - `scripts/preview.py` — 三视图 + 分层图
 - `scripts/downscale.py` — 尺寸缩放：`--factor 2` 即一半（见上文「缩放」一节）
